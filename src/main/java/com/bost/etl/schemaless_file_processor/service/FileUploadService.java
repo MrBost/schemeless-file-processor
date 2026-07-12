@@ -44,7 +44,7 @@ public class FileUploadService {
         validateFile(file);
         
         UploadTemplate template = templateRepository.findById(templateId)
-                .orElseThrow(() -> new IllegalArgumentException("Template not found with id: " + templateId));
+                .orElseThrow(() -> new ResourceNotFoundException("Template", templateId));
 
         String fileName = storeFile(file);
         String fileType = getFileExtension(file.getOriginalFilename());
@@ -69,7 +69,7 @@ public class FileUploadService {
 
     public FileUploadResponse getUploadById(UUID uploadId) {
         FileUpload fileUpload = fileUploadRepository.findById(uploadId)
-                .orElseThrow(() -> new IllegalArgumentException("File upload not found with id: " + uploadId));
+                .orElseThrow(() -> new ResourceNotFoundException("FileUpload", uploadId));
         return mapToResponse(fileUpload);
     }
 
@@ -93,24 +93,24 @@ public class FileUploadService {
 
     private void validateFile(MultipartFile file) {
         if (file.isEmpty()) {
-            throw new IllegalArgumentException("File is empty");
+            throw new FileProcessingException("File is empty");
         }
 
         String originalFilename = file.getOriginalFilename();
         if (originalFilename == null) {
-            throw new IllegalArgumentException("Invalid file name");
+            throw new FileProcessingException("Invalid file name");
         }
 
         String fileExtension = getFileExtension(originalFilename);
         List<String> allowedTypeList = Arrays.asList(allowedTypes.split(","));
         
         if (!allowedTypeList.contains(fileExtension.toLowerCase())) {
-            throw new IllegalArgumentException("File type not allowed. Allowed types: " + allowedTypes);
+            throw new FileProcessingException("File type not allowed. Allowed types: " + allowedTypes);
         }
 
         long fileSizeMB = file.getSize() / (1024 * 1024);
         if (fileSizeMB > maxFileSizeMB) {
-            throw new IllegalArgumentException("File size exceeds maximum allowed size of " + maxFileSizeMB + "MB");
+            throw new FileProcessingException("File size exceeds maximum allowed size of " + maxFileSizeMB + "MB");
         }
     }
 
@@ -130,7 +130,7 @@ public class FileUploadService {
 
             return uniqueFileName;
         } catch (IOException ex) {
-            throw new RuntimeException("Failed to store file", ex);
+            throw new FileProcessingException("Failed to store file", ex);
         }
     }
 
