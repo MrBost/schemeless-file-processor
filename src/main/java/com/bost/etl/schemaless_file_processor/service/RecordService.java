@@ -62,20 +62,6 @@ public class RecordService {
                 .toList();
     }
 
-    public List<RecordResponse> getRecordsByJsonbField(UUID uploadId, String key, String value) {
-        validateUploadAccess(uploadId);
-        return recordRepository.findByUploadIdAndJsonbField(uploadId, key, value).stream()
-                .map(this::mapToResponse)
-                .toList();
-    }
-
-    public List<RecordResponse> getRecordsByJsonbCriteria(UUID uploadId, String jsonbCriteria) {
-        validateUploadAccess(uploadId);
-        return recordRepository.findByUploadIdAndJsonbCriteria(uploadId, jsonbCriteria).stream()
-                .map(this::mapToResponse)
-                .toList();
-    }
-
     public long countRecordsByUploadId(UUID uploadId) {
         validateUploadAccess(uploadId);
         return recordRepository.countByUploadId(uploadId);
@@ -102,14 +88,15 @@ public class RecordService {
     }
 
     private RecordResponse mapToResponse(UploadRecord record) {
-        return RecordResponse.builder()
+        RecordResponse response = RecordResponse.builder()
                 .recordId(record.getId())
                 .uploadId(record.getUpload().getId())
-                .recordData(record.getRecordData())
                 .validationStatus(record.getValidationStatus())
-                .validationErrors(record.getValidationErrors())
                 .processingStatus(record.getProcessingStatus())
                 .createdAt(record.getCreatedAt())
                 .build();
+        response.setRecordData(record.getRecordData());
+        response.setValidationErrors(record.getValidationErrors());
+        return response;
     }
 }

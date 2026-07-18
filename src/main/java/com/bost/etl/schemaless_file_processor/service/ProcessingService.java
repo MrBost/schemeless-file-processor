@@ -50,6 +50,9 @@ public class ProcessingService {
     @Value("${app.file.storage.location:./uploads}")
     private String storageLocation;
 
+    @Value("${app.kafka.enabled:true}")
+    private boolean kafkaEnabled;
+
     public void processFileUpload(UUID uploadId) {
         log.info("Starting processing for upload ID: {}", uploadId);
         long startTime = System.currentTimeMillis();
@@ -163,21 +166,28 @@ public class ProcessingService {
                 metrics.incrementFileProcessingFailure(fileUpload.getFileType());
             }
 
-            long kafkaStart = System.currentTimeMillis();
-            UploadCompletedEvent event = UploadCompletedEvent.builder()
-                    .uploadId(fileUpload.getId())
-                    .templateId(fileUpload.getTemplate().getId())
-                    .fileName(fileUpload.getFileName())
-                    .uploadStatus(fileUpload.getUploadStatus())
-                    .totalRecords(totalRecords)
-                    .successfulRecords(successfulRecords)
-                    .failedRecords(failedRecords)
-                    .uploadedBy(fileUpload.getUploadedBy())
-                    .completedAt(LocalDateTime.now())
-                    .build();
+            // Conditionally publish to Kafka based on configuration
+            if (kafkaEnabled) {
+                long kafkaStart = System.currentTimeMillis();
+                UploadCompletedEvent event = UploadCompletedEvent.builder()
+                        .uploadId(fileUpload.getId())
+                        .templateId(fileUpload.getTemplate().getId())
+                        .fileName(fileUpload.getFileName())
+                        .uploadStatus(fileUpload.getUploadStatus())
+                        .totalRecords(totalRecords)
+                        .successfulRecords(successfulRecords)
+                        .failedRecords(failedRecords)
+                        .uploadedBy(fileUpload.getUploadedBy())
+                        .completedAt(LocalDateTime.now())
+                        .build();
 
-            kafkaEventProducer.publishUploadCompletedEvent(event);
-            metrics.recordKafkaPublishTime("upload-completed", System.currentTimeMillis() - kafkaStart);
+                try {
+                    kafkaEventProducer.publishUploadCompletedEvent(event);
+                    metrics.recordKafkaPublishTime("upload-completed", System.currentTimeMillis() - kafkaStart);
+                } catch (Exception e) {
+                    log.warn("Failed to publish Kafka event, but processing completed successfully", e);
+                }
+            }
 
             log.info("Processing completed for upload ID: {}. Total: {}, Successful: {}, Failed: {}", 
                     uploadId, totalRecords, successfulRecords, failedRecords);

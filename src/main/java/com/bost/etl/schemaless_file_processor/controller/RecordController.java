@@ -67,25 +67,6 @@ public class RecordController {
         return ResponseEntity.ok(records);
     }
 
-    @GetMapping("/upload/{uploadId}/field/{fieldName}")
-    @Operation(summary = "Get records by JSONB field", description = "Retrieve records filtered by a specific JSONB field value")
-    public ResponseEntity<List<RecordResponse>> getRecordsByField(
-            @Parameter(description = "Upload ID") @PathVariable UUID uploadId,
-            @Parameter(description = "Field name to filter by") @PathVariable String fieldName,
-            @Parameter(description = "Field value to match") @RequestParam String value) {
-        List<RecordResponse> records = recordService.getRecordsByJsonbField(uploadId, fieldName, value);
-        return ResponseEntity.ok(records);
-    }
-
-    @GetMapping("/upload/{uploadId}/search")
-    @Operation(summary = "Search records with JSONB criteria", description = "Retrieve records matching JSONB criteria (e.g., {\"name\":\"John\",\"age\":30})")
-    public ResponseEntity<List<RecordResponse>> searchRecords(
-            @Parameter(description = "Upload ID") @PathVariable UUID uploadId,
-            @Parameter(description = "JSONB criteria for filtering") @RequestParam String criteria) {
-        List<RecordResponse> records = recordService.getRecordsByJsonbCriteria(uploadId, criteria);
-        return ResponseEntity.ok(records);
-    }
-
     @GetMapping("/upload/{uploadId}/count")
     @Operation(summary = "Count records for an upload", description = "Get total count of records for a specific file upload")
     public ResponseEntity<Long> countRecords(

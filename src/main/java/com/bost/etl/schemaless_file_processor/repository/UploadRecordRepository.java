@@ -35,16 +35,6 @@ public interface UploadRecordRepository extends JpaRepository<UploadRecord, UUID
     @Query("SELECT COUNT(r) FROM UploadRecord r WHERE r.upload.id = :uploadId AND r.validationStatus = 'INVALID'")
     long countInvalidByUploadId(@Param("uploadId") UUID uploadId);
 
-    // JSONB queries for PostgreSQL
-    @Query(value = "SELECT * FROM upload_record WHERE upload_id = :uploadId AND record_data @> CAST(:jsonbCriteria AS jsonb)", nativeQuery = true)
-    List<UploadRecord> findByUploadIdAndJsonbCriteria(@Param("uploadId") UUID uploadId, @Param("jsonbCriteria") String jsonbCriteria);
-
-    @Query(value = "SELECT * FROM upload_record WHERE upload_id = :uploadId AND record_data ->> :key = :value", nativeQuery = true)
-    List<UploadRecord> findByUploadIdAndJsonbField(@Param("uploadId") UUID uploadId, @Param("key") String key, @Param("value") String value);
-
-    @Query(value = "SELECT * FROM upload_record WHERE upload_id = :uploadId AND record_data ? :key", nativeQuery = true)
-    List<UploadRecord> findByUploadIdAndJsonbKeyExists(@Param("uploadId") UUID uploadId, @Param("key") String key);
-
     // Paginated queries
     Page<UploadRecord> findByUploadId(UUID uploadId, Pageable pageable);
 
