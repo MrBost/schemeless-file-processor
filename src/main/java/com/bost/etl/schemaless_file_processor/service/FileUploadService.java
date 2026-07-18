@@ -3,6 +3,7 @@ package com.bost.etl.schemaless_file_processor.service;
 import com.bost.etl.schemaless_file_processor.dto.FileUploadResponse;
 import com.bost.etl.schemaless_file_processor.entity.FileUpload;
 import com.bost.etl.schemaless_file_processor.entity.UploadTemplate;
+import com.bost.etl.schemaless_file_processor.exception.AccessDeniedException;
 import com.bost.etl.schemaless_file_processor.exception.FileProcessingException;
 import com.bost.etl.schemaless_file_processor.exception.ResourceNotFoundException;
 import com.bost.etl.schemaless_file_processor.repository.FileUploadRepository;
@@ -10,6 +11,8 @@ import com.bost.etl.schemaless_file_processor.repository.UploadTemplateRepositor
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -21,6 +24,8 @@ import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+
+import static com.bost.etl.schemaless_file_processor.security.UserContext.getCurrentUsername;
 
 @Service
 @RequiredArgsConstructor
@@ -46,6 +51,12 @@ public class FileUploadService {
         UploadTemplate template = templateRepository.findById(templateId)
                 .orElseThrow(() -> new ResourceNotFoundException("Template", templateId));
 
+        // Verify user owns the template
+        String currentUser = getCurrentUsername();
+        if (!template.getCreatedBy().equals(currentUser)) {
+            throw new AccessDeniedException("You can only upload files using your own templates");
+        }
+
         String fileName = storeFile(file);
         String fileType = getFileExtension(file.getOriginalFilename());
 
@@ -68,25 +79,53 @@ public class FileUploadService {
     }
 
     public FileUploadResponse getUploadById(UUID uploadId) {
+        String currentUser = getCurrentUsername();
         FileUpload fileUpload = fileUploadRepository.findById(uploadId)
                 .orElseThrow(() -> new ResourceNotFoundException("FileUpload", uploadId));
+        
+        // Verify user owns the upload
+        if (!fileUpload.getUploadedBy().equals(currentUser)) {
+            throw new AccessDeniedException("You can only view your own uploads");
+        }
         return mapToResponse(fileUpload);
     }
 
     public List<FileUploadResponse> getUploadsByTemplate(UUID templateId) {
+        String currentUser = getCurrentUsername();
+        
+        // Verify user owns the template
+        UploadTemplate template = templateRepository.findById(templateId)
+                .orElseThrow(() -> new ResourceNotFoundException("Template", templateId));
+        
+        if (!template.getCreatedBy().equals(currentUser)) {
+            throw new AccessDeniedException("You can only view uploads for your own templates");
+        }
+        
         return fileUploadRepository.findByTemplateId(templateId).stream()
                 .map(this::mapToResponse)
                 .toList();
     }
 
     public List<FileUploadResponse> getUploadsByUser(String uploadedBy) {
+        String currentUser = getCurrentUsername();
+        
+        // Users can only view their own uploads
+        if (!currentUser.equals(uploadedBy)) {
+            log.warn("User {} attempted to access uploads of user {}", currentUser, uploadedBy);
+            throw new AccessDeniedException("You can only view your own uploads");
+        }
+        
         return fileUploadRepository.findByUploadedBy(uploadedBy).stream()
                 .map(this::mapToResponse)
                 .toList();
     }
 
     public List<FileUploadResponse> getUploadsByStatus(String status) {
+        String currentUser = getCurrentUsername();
+        
+        // Users can only view their own uploads by status
         return fileUploadRepository.findByUploadStatus(status).stream()
+                .filter(upload -> upload.getUploadedBy().equals(currentUser))
                 .map(this::mapToResponse)
                 .toList();
     }

@@ -19,7 +19,7 @@ import java.util.UUID;
 public class TemplateField {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
     @ManyToOne(fetch = FetchType.LAZY)
@@ -33,6 +33,7 @@ public class TemplateField {
     private String fieldType;
 
     @Column(name = "required")
+    @Builder.Default
     private Boolean required = false;
 
     @Column(name = "validation_rule", columnDefinition = "TEXT")

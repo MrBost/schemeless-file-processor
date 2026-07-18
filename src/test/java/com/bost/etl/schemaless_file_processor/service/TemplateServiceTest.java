@@ -71,14 +71,12 @@ class TemplateServiceTest {
     void createTemplate_Success() {
         when(templateRepository.existsByTemplateName(anyString())).thenReturn(false);
         when(templateRepository.save(any(UploadTemplate.class))).thenReturn(template);
-        when(fieldRepository.saveAll(anyList())).thenReturn(Arrays.asList());
 
         var response = templateService.createTemplate(templateRequest, "test_user");
 
         assertNotNull(response);
         assertEquals("customer_template", response.getTemplateName());
         verify(templateRepository).save(any(UploadTemplate.class));
-        verify(fieldRepository).saveAll(anyList());
     }
 
     @Test

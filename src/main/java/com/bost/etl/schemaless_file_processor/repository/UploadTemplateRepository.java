@@ -20,5 +20,8 @@ public interface UploadTemplateRepository extends JpaRepository<UploadTemplate, 
     @Query("SELECT t FROM UploadTemplate t LEFT JOIN FETCH t.fields WHERE t.id = :id")
     Optional<UploadTemplate> findByIdWithFields(@Param("id") UUID id);
 
+    @Query("SELECT t FROM UploadTemplate t LEFT JOIN FETCH t.fields WHERE t.id = :id AND t.createdBy = :createdBy")
+    Optional<UploadTemplate> findByIdWithFieldsAndCreator(@Param("id") UUID id, @Param("createdBy") String createdBy);
+
     boolean existsByTemplateName(String templateName);
 }

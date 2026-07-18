@@ -6,10 +6,15 @@ import com.bost.etl.schemaless_file_processor.dto.TemplateFieldResponse;
 import com.bost.etl.schemaless_file_processor.dto.TemplateResponse;
 import com.bost.etl.schemaless_file_processor.entity.TemplateField;
 import com.bost.etl.schemaless_file_processor.entity.UploadTemplate;
+import com.bost.etl.schemaless_file_processor.exception.AccessDeniedException;
 import com.bost.etl.schemaless_file_processor.exception.ResourceNotFoundException;
 import com.bost.etl.schemaless_file_processor.repository.TemplateFieldRepository;
 import com.bost.etl.schemaless_file_processor.repository.UploadTemplateRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,9 +22,12 @@ import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import static com.bost.etl.schemaless_file_processor.security.UserContext.getCurrentUsername;
+
 @Service
 @RequiredArgsConstructor
 @Transactional
+@Slf4j
 public class TemplateService {
 
     private final UploadTemplateRepository templateRepository;
@@ -48,26 +56,48 @@ public class TemplateService {
     }
 
     public TemplateResponse getTemplateById(UUID id) {
-        UploadTemplate template = templateRepository.findByIdWithFields(id)
-                .orElseThrow(() -> new ResourceNotFoundException("Template", id));
+        String currentUser = getCurrentUsername();
+        
+        // First check if template exists
+        if (!templateRepository.existsById(id)) {
+            throw new ResourceNotFoundException("Template", id);
+        }
+        
+        // Then check if user has access
+        UploadTemplate template = templateRepository.findByIdWithFieldsAndCreator(id, currentUser)
+                .orElseThrow(() -> new AccessDeniedException("You do not have access to this template"));
+        
         return mapToResponse(template);
     }
 
     public List<TemplateResponse> getAllTemplates() {
-        return templateRepository.findAll().stream()
+        String currentUser = getCurrentUsername();
+        return templateRepository.findByCreatedBy(currentUser).stream()
                 .map(this::mapToResponse)
                 .collect(Collectors.toList());
     }
 
     public List<TemplateResponse> getTemplatesByCreator(String createdBy) {
+        String currentUser = getCurrentUsername();
+        // Users can only view their own templates
+        if (!currentUser.equals(createdBy)) {
+            log.warn("User {} attempted to access templates of user {}", currentUser, createdBy);
+            throw new AccessDeniedException("You can only view your own templates");
+        }
         return templateRepository.findByCreatedBy(createdBy).stream()
                 .map(this::mapToResponse)
                 .collect(Collectors.toList());
     }
 
     public TemplateResponse updateTemplate(UUID id, TemplateCreateRequest request) {
+        String currentUser = getCurrentUsername();
         UploadTemplate template = templateRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Template", id));
+
+        // Check ownership
+        if (!template.getCreatedBy().equals(currentUser)) {
+            throw new AccessDeniedException("You can only update your own templates");
+        }
 
         if (!template.getTemplateName().equals(request.getTemplateName()) &&
                 templateRepository.existsByTemplateName(request.getTemplateName())) {
@@ -79,8 +109,9 @@ public class TemplateService {
 
         fieldRepository.deleteByTemplateId(id);
 
+        UploadTemplate finalTemplate = template;
         List<TemplateField> fields = request.getFields().stream()
-                .map(fieldRequest -> createField(fieldRequest, template))
+                .map(fieldRequest -> createField(fieldRequest, finalTemplate))
                 .collect(Collectors.toList());
 
         template.setFields(fields);
@@ -90,9 +121,15 @@ public class TemplateService {
     }
 
     public void deleteTemplate(UUID id) {
-        if (!templateRepository.existsById(id)) {
-            throw new ResourceNotFoundException("Template", id);
+        String currentUser = getCurrentUsername();
+        UploadTemplate template = templateRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Template", id));
+
+        // Check ownership
+        if (!template.getCreatedBy().equals(currentUser)) {
+            throw new AccessDeniedException("You can only delete your own templates");
         }
+
         templateRepository.deleteById(id);
     }
 

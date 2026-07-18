@@ -4,21 +4,26 @@ import com.bost.etl.schemaless_file_processor.dto.TemplateCreateRequest;
 import com.bost.etl.schemaless_file_processor.dto.TemplateResponse;
 import com.bost.etl.schemaless_file_processor.service.TemplateService;
 import io.swagger.v3.oas.annotations.Operation;
-import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.UUID;
 
+import static com.bost.etl.schemaless_file_processor.security.UserContext.getCurrentUsername;
+
 @RestController
 @RequestMapping("/templates")
 @RequiredArgsConstructor
 @Tag(name = "Template Management", description = "APIs for managing upload templates")
+@SecurityRequirement(name = "bearerAuth")
 public class TemplateController {
 
     private final TemplateService templateService;
@@ -26,9 +31,9 @@ public class TemplateController {
     @PostMapping
     @Operation(summary = "Create a new template", description = "Create a new upload template with field definitions")
     public ResponseEntity<TemplateResponse> createTemplate(
-            @Valid @RequestBody TemplateCreateRequest request,
-            @Parameter(description = "User creating the template") @RequestHeader(value = "X-User-Id", defaultValue = "system") String userId) {
-        TemplateResponse response = templateService.createTemplate(request, userId);
+            @Valid @RequestBody TemplateCreateRequest request) {
+        String currentUser = getCurrentUsername();
+        TemplateResponse response = templateService.createTemplate(request, currentUser);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
@@ -40,14 +45,14 @@ public class TemplateController {
     }
 
     @GetMapping
-    @Operation(summary = "Get all templates", description = "Retrieve all available templates")
+    @Operation(summary = "Get all templates", description = "Retrieve all templates created by the authenticated user")
     public ResponseEntity<List<TemplateResponse>> getAllTemplates() {
         List<TemplateResponse> responses = templateService.getAllTemplates();
         return ResponseEntity.ok(responses);
     }
 
     @GetMapping("/creator/{userId}")
-    @Operation(summary = "Get templates by creator", description = "Retrieve all templates created by a specific user")
+    @Operation(summary = "Get templates by creator", description = "Retrieve all templates created by a specific user (only your own templates)")
     public ResponseEntity<List<TemplateResponse>> getTemplatesByCreator(@PathVariable String userId) {
         List<TemplateResponse> responses = templateService.getTemplatesByCreator(userId);
         return ResponseEntity.ok(responses);
@@ -68,4 +73,5 @@ public class TemplateController {
         templateService.deleteTemplate(id);
         return ResponseEntity.noContent().build();
     }
+
 }

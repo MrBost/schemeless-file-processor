@@ -22,7 +22,7 @@ import java.util.UUID;
 public class UploadRecord {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
     @ManyToOne(fetch = FetchType.LAZY)
@@ -34,6 +34,7 @@ public class UploadRecord {
     private JsonNode recordData;
 
     @Column(name = "validation_status")
+    @Builder.Default
     private String validationStatus = "PENDING";
 
     @JdbcTypeCode(SqlTypes.JSON)
@@ -41,6 +42,7 @@ public class UploadRecord {
     private JsonNode validationErrors;
 
     @Column(name = "processing_status")
+    @Builder.Default
     private String processingStatus = "PENDING";
 
     @CreationTimestamp

@@ -19,7 +19,7 @@ import java.util.UUID;
 public class FileUpload {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
     @ManyToOne(fetch = FetchType.LAZY)
@@ -36,15 +36,19 @@ public class FileUpload {
     private String uploadedBy;
 
     @Column(name = "upload_status")
+    @Builder.Default
     private String uploadStatus = "PENDING";
 
     @Column(name = "total_records")
+    @Builder.Default
     private Integer totalRecords = 0;
 
     @Column(name = "successful_records")
+    @Builder.Default
     private Integer successfulRecords = 0;
 
     @Column(name = "failed_records")
+    @Builder.Default
     private Integer failedRecords = 0;
 
     @CreationTimestamp

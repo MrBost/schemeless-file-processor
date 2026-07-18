@@ -1,20 +1,26 @@
 package com.bost.etl.schemaless_file_processor.security;
 
+import com.bost.etl.schemaless_file_processor.entity.User;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Date;
+import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Component
 public class JwtUtil {
 
-    @Value("${app.jwt.secret:your-secret-key-must-be-at-least-256-bits-long-for-hs256-algorithm}")
+    @Value("${app.jwt.secret}")
     private String secret;
 
     @Value("${app.jwt.expiration:86400000}")
@@ -24,9 +30,15 @@ public class JwtUtil {
         return Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
     }
 
-    public String generateToken(String username) {
+    public String generateToken(User user) {
+        Map<String, Object> claims = Map.of(
+                "roles", user.getRoles().stream()
+                        .map(role -> "ROLE_" + role.name())
+                        .collect(Collectors.toList())
+        );
         return Jwts.builder()
-                .subject(username)
+                .claims(claims)
+                .subject(user.getUsername())
                 .issuedAt(new Date())
                 .expiration(new Date(System.currentTimeMillis() + expiration))
                 .signWith(getSigningKey())
@@ -39,6 +51,11 @@ public class JwtUtil {
 
     public Date extractExpiration(String token) {
         return extractClaim(token, Claims::getExpiration);
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<String> extractRoles(String token) {
+        return extractClaim(token, claims -> claims.get("roles", List.class));
     }
 
     public <T> T extractClaim(String token, Function<Claims, T> claimsResolver) {

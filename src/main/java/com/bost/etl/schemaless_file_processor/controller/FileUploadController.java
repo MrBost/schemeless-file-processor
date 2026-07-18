@@ -4,20 +4,26 @@ import com.bost.etl.schemaless_file_processor.dto.FileUploadResponse;
 import com.bost.etl.schemaless_file_processor.service.FileUploadService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.UUID;
 
+import static com.bost.etl.schemaless_file_processor.security.UserContext.getCurrentUsername;
+
 @RestController
 @RequestMapping("/uploads")
 @RequiredArgsConstructor
 @Tag(name = "File Upload", description = "APIs for file upload management")
+@SecurityRequirement(name = "bearerAuth")
 public class FileUploadController {
 
     private final FileUploadService fileUploadService;
@@ -26,9 +32,9 @@ public class FileUploadController {
     @Operation(summary = "Upload a file", description = "Upload a CSV or Excel file for processing")
     public ResponseEntity<FileUploadResponse> uploadFile(
             @Parameter(description = "File to upload") @RequestParam("file") MultipartFile file,
-            @Parameter(description = "Template ID to use for processing") @RequestParam("templateId") UUID templateId,
-            @Parameter(description = "User uploading the file") @RequestHeader(value = "X-User-Id", defaultValue = "system") String userId) {
-        FileUploadResponse response = fileUploadService.uploadFile(file, templateId, userId);
+            @Parameter(description = "Template ID to use for processing") @RequestParam("templateId") UUID templateId) {
+        String currentUser = getCurrentUsername();
+        FileUploadResponse response = fileUploadService.uploadFile(file, templateId, currentUser);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
@@ -59,4 +65,5 @@ public class FileUploadController {
         List<FileUploadResponse> responses = fileUploadService.getUploadsByStatus(status);
         return ResponseEntity.ok(responses);
     }
+
 }
