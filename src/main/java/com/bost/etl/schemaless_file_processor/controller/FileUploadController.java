@@ -8,6 +8,7 @@ import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -28,10 +29,10 @@ public class FileUploadController {
 
     private final FileUploadService fileUploadService;
 
-    @PostMapping
+    @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @Operation(summary = "Upload a file", description = "Upload a CSV or Excel file for processing")
     public ResponseEntity<FileUploadResponse> uploadFile(
-            @Parameter(description = "File to upload") @RequestParam("file") MultipartFile file,
+            @Parameter(description = "File to upload") @RequestPart("file") MultipartFile file,
             @Parameter(description = "Template ID to use for processing") @RequestParam("templateId") UUID templateId) {
         String currentUser = getCurrentUsername();
         FileUploadResponse response = fileUploadService.uploadFile(file, templateId, currentUser);

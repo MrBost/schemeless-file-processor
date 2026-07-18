@@ -2,27 +2,32 @@ package com.bost.etl.schemaless_file_processor.service;
 
 import com.bost.etl.schemaless_file_processor.dto.FileUploadResponse;
 import com.bost.etl.schemaless_file_processor.entity.FileUpload;
+import com.bost.etl.schemaless_file_processor.entity.TemplateField;
 import com.bost.etl.schemaless_file_processor.entity.UploadTemplate;
 import com.bost.etl.schemaless_file_processor.exception.AccessDeniedException;
 import com.bost.etl.schemaless_file_processor.exception.FileProcessingException;
 import com.bost.etl.schemaless_file_processor.exception.ResourceNotFoundException;
+import com.bost.etl.schemaless_file_processor.reader.FileReaderFactory;
 import com.bost.etl.schemaless_file_processor.repository.FileUploadRepository;
 import com.bost.etl.schemaless_file_processor.repository.UploadTemplateRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static com.bost.etl.schemaless_file_processor.security.UserContext.getCurrentUsername;
@@ -35,6 +40,8 @@ public class FileUploadService {
 
     private final FileUploadRepository fileUploadRepository;
     private final UploadTemplateRepository templateRepository;
+    private final ProcessingService processingService;
+    private final FileReaderFactory fileReaderFactory;
 
     @Value("${app.file.storage.location:./uploads}")
     private String storageLocation;
@@ -57,8 +64,21 @@ public class FileUploadService {
             throw new AccessDeniedException("You can only upload files using your own templates");
         }
 
-        String fileName = storeFile(file);
         String fileType = getFileExtension(file.getOriginalFilename());
+
+        // Read file bytes once to allow multiple operations
+        byte[] fileBytes = null;
+        try {
+            fileBytes = file.getBytes();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        // Validate headers BEFORE storing the file (more efficient for large files)
+        validateHeadersFromBytes(fileBytes, fileType, template);
+
+        // Store file only after header validation passes
+        String fileName = storeFile(fileBytes, fileType);
 
         FileUpload fileUpload = FileUpload.builder()
                 .template(template)
@@ -75,7 +95,20 @@ public class FileUploadService {
 
         log.info("File uploaded successfully: {} by user: {}", fileName, uploadedBy);
 
+        // Trigger async processing
+        processFileAsync(fileUpload.getId());
+
         return mapToResponse(fileUpload);
+    }
+
+    @Async
+    public void processFileAsync(UUID uploadId) {
+        try {
+            log.info("Starting async processing for upload ID: {}", uploadId);
+            processingService.processFileUpload(uploadId);
+        } catch (Exception e) {
+            log.error("Error during async file processing for upload ID: {}", uploadId, e);
+        }
     }
 
     public FileUploadResponse getUploadById(UUID uploadId) {
@@ -153,19 +186,58 @@ public class FileUploadService {
         }
     }
 
-    private String storeFile(MultipartFile file) {
+    private void validateHeadersFromBytes(byte[] fileBytes, String fileType, UploadTemplate template) {
+        try (InputStream inputStream = new ByteArrayInputStream(fileBytes)) {
+            // Create a temporary file to read headers
+            Path tempPath = Files.createTempFile("header-validation-", "." + fileType);
+            Files.copy(inputStream, tempPath);
+            
+            try {
+                File tempFile = tempPath.toFile();
+                Map<String, String> fileHeaders = fileReaderFactory.readHeaders(tempFile, fileType);
+                
+                List<String> expectedFields = template.getFields().stream()
+                        .map(TemplateField::getFieldName)
+                        .toList();
+                
+                List<String> actualHeaders = fileHeaders.values().stream()
+                        .map(String::trim)
+                        .toList();
+                
+                // Check for missing required fields
+                List<String> missingFields = expectedFields.stream()
+                        .filter(expected -> !actualHeaders.contains(expected))
+                        .toList();
+                
+                if (!missingFields.isEmpty()) {
+                    throw new FileProcessingException(
+                            "File headers do not match template '" + template.getTemplateName() + "'. Missing required fields: " + 
+                            String.join(", ", missingFields)
+                    );
+                }
+                
+                log.info("Header validation passed for template '{}'", template.getTemplateName());
+            } finally {
+                // Clean up temporary file
+                Files.deleteIfExists(tempPath);
+            }
+        } catch (FileProcessingException e) {
+            throw e; // Re-throw FileProcessingException as-is
+        } catch (Exception e) {
+            throw new FileProcessingException("Failed to validate file headers: " + e.getMessage(), e);
+        }
+    }
+
+    private String storeFile(byte[] fileBytes, String fileType) {
         try {
             Path uploadPath = Paths.get(storageLocation);
             if (!Files.exists(uploadPath)) {
                 Files.createDirectories(uploadPath);
             }
 
-            String originalFilename = file.getOriginalFilename();
-            String fileExtension = getFileExtension(originalFilename);
-            String uniqueFileName = UUID.randomUUID() + "." + fileExtension;
-
+            String uniqueFileName = UUID.randomUUID() + "." + fileType;
             Path targetLocation = uploadPath.resolve(uniqueFileName);
-            Files.copy(file.getInputStream(), targetLocation);
+            Files.write(targetLocation, fileBytes);
 
             return uniqueFileName;
         } catch (IOException ex) {
