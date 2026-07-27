@@ -1,10 +1,6 @@
 package com.bost.etl.schemaless_file_processor.service;
 
-import com.bost.etl.schemaless_file_processor.entity.FileUpload;
-import com.bost.etl.schemaless_file_processor.entity.TemplateField;
-import com.bost.etl.schemaless_file_processor.entity.UploadError;
-import com.bost.etl.schemaless_file_processor.entity.UploadRecord;
-import com.bost.etl.schemaless_file_processor.entity.UploadTemplate;
+import com.bost.etl.schemaless_file_processor.entity.*;
 import com.bost.etl.schemaless_file_processor.exception.FileProcessingException;
 import com.bost.etl.schemaless_file_processor.exception.ResourceNotFoundException;
 import com.bost.etl.schemaless_file_processor.kafka.event.UploadCompletedEvent;
@@ -12,18 +8,15 @@ import com.bost.etl.schemaless_file_processor.kafka.producer.KafkaEventProducer;
 import com.bost.etl.schemaless_file_processor.mapper.FieldMapper;
 import com.bost.etl.schemaless_file_processor.metrics.FileProcessingMetrics;
 import com.bost.etl.schemaless_file_processor.reader.FileReaderFactory;
-import com.bost.etl.schemaless_file_processor.repository.FileUploadRepository;
-import com.bost.etl.schemaless_file_processor.repository.UploadErrorRepository;
-import com.bost.etl.schemaless_file_processor.repository.UploadRecordRepository;
-import com.bost.etl.schemaless_file_processor.repository.UploadTemplateRepository;
+import com.bost.etl.schemaless_file_processor.repository.*;
 import com.bost.etl.schemaless_file_processor.validator.RecordValidator;
 import com.fasterxml.jackson.databind.JsonNode;
+import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
 import java.io.File;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
@@ -31,188 +24,45 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-@Service
-@RequiredArgsConstructor
-@Slf4j
-@Transactional
+@Service @RequiredArgsConstructor @Slf4j
 public class ProcessingService {
+    private final FileReaderFactory fileReaderFactory; private final FieldMapper fieldMapper; private final RecordValidator recordValidator;
+    private final FileUploadRepository fileUploadRepository; private final UploadTemplateRepository templateRepository;
+    private final KafkaEventProducer kafkaEventProducer; private final FileProcessingMetrics metrics; private final EntityManager entityManager;
+    @Value("${app.file.storage.location:./uploads}") private String storageLocation;
+    @Value("${app.kafka.enabled:true}") private boolean kafkaEnabled;
+    @Value("${app.file.processing.batch-size:250}") private int batchSize;
 
-    private final FileReaderFactory fileReaderFactory;
-    private final FieldMapper fieldMapper;
-    private final RecordValidator recordValidator;
-    private final FileUploadRepository fileUploadRepository;
-    private final UploadTemplateRepository templateRepository;
-    private final UploadRecordRepository recordRepository;
-    private final UploadErrorRepository errorRepository;
-    private final KafkaEventProducer kafkaEventProducer;
-    private final FileProcessingMetrics metrics;
-
-    @Value("${app.file.storage.location:./uploads}")
-    private String storageLocation;
-
-    @Value("${app.kafka.enabled:true}")
-    private boolean kafkaEnabled;
-
+    @Transactional
     public void processFileUpload(UUID uploadId) {
-        log.info("Starting processing for upload ID: {}", uploadId);
-        long startTime = System.currentTimeMillis();
-
-        FileUpload fileUpload = fileUploadRepository.findById(uploadId)
-                .orElseThrow(() -> new ResourceNotFoundException("FileUpload", uploadId));
-
-        if (!"PENDING".equals(fileUpload.getUploadStatus())) {
-            log.warn("File upload {} is not in PENDING status, current status: {}", uploadId, fileUpload.getUploadStatus());
-            return;
-        }
-
+        FileUpload upload=fileUploadRepository.findById(uploadId).orElseThrow(()->new ResourceNotFoundException("FileUpload",uploadId));
+        if (!"PENDING".equals(upload.getUploadStatus())) { log.info("Skipping upload {} with status {}",uploadId,upload.getUploadStatus()); return; }
+        upload.setUploadStatus("PROCESSING"); fileUploadRepository.save(upload);
+        long started=System.currentTimeMillis(); Counters counters=new Counters();
         try {
-            fileUpload.setUploadStatus("PROCESSING");
-            fileUploadRepository.save(fileUpload);
-
-            UploadTemplate template = templateRepository.findByIdWithFields(fileUpload.getTemplate().getId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Template", fileUpload.getTemplate().getId()));
-
-            List<TemplateField> templateFields = template.getFields();
-
-            File file = Paths.get(storageLocation, fileUpload.getFileName()).toFile();
-            if (!file.exists()) {
-                throw new FileProcessingException("File not found: " + file.getAbsolutePath());
-            }
-
-            List<Map<String, String>> rows = fileReaderFactory.readRows(file, fileUpload.getFileType());
-            metrics.incrementFileUploads(fileUpload.getFileType());
-
-            int totalRecords = rows.size();
-            int successfulRecords = 0;
-            int failedRecords = 0;
-            int currentRow = 1;
-
-            String templateId = template.getId().toString();
-
-            for (Map<String, String> rowData : rows) {
-                try {
-                    long mapStart = System.currentTimeMillis();
-                    JsonNode mappedData = fieldMapper.mapRowToTemplateFields(rowData, templateFields);
-                    metrics.recordMappingTime(templateId, System.currentTimeMillis() - mapStart);
-                    
-                    long validateStart = System.currentTimeMillis();
-                    RecordValidator.ValidationResult validationResult = 
-                            recordValidator.validateRecord(mappedData, templateFields);
-                    metrics.recordValidationTime(templateId, System.currentTimeMillis() - validateStart);
-
-                    if (validationResult.isValid()) {
-                        UploadRecord record = UploadRecord.builder()
-                                .upload(fileUpload)
-                                .recordData(mappedData)
-                                .validationStatus("VALID")
-                                .processingStatus("PENDING")
-                                .build();
-                        
-                        recordRepository.save(record);
-                        successfulRecords++;
-                        metrics.incrementRecordsValid(templateId);
-                    } else {
-                        UploadRecord record = UploadRecord.builder()
-                                .upload(fileUpload)
-                                .recordData(mappedData)
-                                .validationStatus("INVALID")
-                                .validationErrors(validationResult.getErrors())
-                                .processingStatus("FAILED")
-                                .build();
-                        
-                        recordRepository.save(record);
-
-                        UploadError error = UploadError.builder()
-                                .upload(fileUpload)
-                                .rowNumber(currentRow)
-                                .errorMessage("Validation failed: " + validationResult.getErrors().toString())
-                                .rowData(mappedData)
-                                .build();
-                        
-                        errorRepository.save(error);
-                        failedRecords++;
-                        metrics.incrementRecordsInvalid(templateId);
-                    }
-                } catch (Exception e) {
-                    log.error("Error processing row {}: {}", currentRow, e.getMessage());
-                    
-                    UploadError error = UploadError.builder()
-                            .upload(fileUpload)
-                            .rowNumber(currentRow)
-                            .errorMessage("Processing error: " + e.getMessage())
-                            .rowData(fieldMapper.getObjectMapper().valueToTree(rowData))
-                            .build();
-                    
-                    errorRepository.save(error);
-                    failedRecords++;
-                    metrics.incrementRecordsInvalid(templateId);
-                }
-
-                currentRow++;
-            }
-
-            fileUpload.setTotalRecords(totalRecords);
-            fileUpload.setSuccessfulRecords(successfulRecords);
-            fileUpload.setFailedRecords(failedRecords);
-            fileUpload.setUploadStatus(successfulRecords == totalRecords ? "COMPLETED" : "PARTIALLY_COMPLETED");
-            fileUploadRepository.save(fileUpload);
-
-            metrics.incrementRecordsProcessed(templateId);
-            metrics.recordProcessingTime(fileUpload.getFileType(), System.currentTimeMillis() - startTime);
-
-            if (successfulRecords == totalRecords) {
-                metrics.incrementFileProcessingSuccess(fileUpload.getFileType());
-            } else {
-                metrics.incrementFileProcessingFailure(fileUpload.getFileType());
-            }
-
-            // Conditionally publish to Kafka based on configuration
-            if (kafkaEnabled) {
-                long kafkaStart = System.currentTimeMillis();
-                UploadCompletedEvent event = UploadCompletedEvent.builder()
-                        .uploadId(fileUpload.getId())
-                        .templateId(fileUpload.getTemplate().getId())
-                        .fileName(fileUpload.getFileName())
-                        .uploadStatus(fileUpload.getUploadStatus())
-                        .totalRecords(totalRecords)
-                        .successfulRecords(successfulRecords)
-                        .failedRecords(failedRecords)
-                        .uploadedBy(fileUpload.getUploadedBy())
-                        .completedAt(LocalDateTime.now())
-                        .build();
-
-                try {
-                    kafkaEventProducer.publishUploadCompletedEvent(event);
-                    metrics.recordKafkaPublishTime("upload-completed", System.currentTimeMillis() - kafkaStart);
-                } catch (Exception e) {
-                    log.warn("Failed to publish Kafka event, but processing completed successfully", e);
-                }
-            }
-
-            log.info("Processing completed for upload ID: {}. Total: {}, Successful: {}, Failed: {}", 
-                    uploadId, totalRecords, successfulRecords, failedRecords);
-
-        } catch (Exception e) {
-            log.error("Error processing file upload {}: {}", uploadId, e.getMessage(), e);
-            fileUpload.setUploadStatus("FAILED");
-            fileUploadRepository.save(fileUpload);
-            throw new FileProcessingException("Failed to process file upload", e);
-        }
+            UploadTemplate template=templateRepository.findByIdWithFields(upload.getTemplate().getId()).orElseThrow(()->new ResourceNotFoundException("Template",upload.getTemplate().getId()));
+            List<TemplateField> fields=template.getFields(); String templateId=template.getId().toString();
+            File file=Paths.get(storageLocation,upload.getFileName()).toFile(); if(!file.isFile()) throw new FileProcessingException("File not found: "+file.getAbsolutePath());
+            final FileUpload[] current={upload};
+            fileReaderFactory.forEachRow(file, upload.getFileType(), row -> {
+                counters.total++; processRow(current[0], row, fields, templateId, counters);
+                if (counters.total % batchSize == 0) { entityManager.flush(); entityManager.clear(); current[0]=entityManager.getReference(FileUpload.class,uploadId); }
+            });
+            entityManager.flush(); entityManager.clear();
+            complete(uploadId,counters,template,started);
+        } catch (Exception exception) { fail(uploadId, exception); log.error("Processing failed for upload {}", uploadId, exception); }
     }
 
-    public void processAllPendingUploads() {
-        log.info("Processing all pending uploads");
-        
-        List<FileUpload> pendingUploads = fileUploadRepository.findByUploadStatus("PENDING");
-        
-        for (FileUpload upload : pendingUploads) {
-            try {
-                processFileUpload(upload.getId());
-            } catch (Exception e) {
-                log.error("Failed to process upload {}: {}", upload.getId(), e.getMessage());
-            }
-        }
-        
-        log.info("Completed processing {} pending uploads", pendingUploads.size());
+    private void processRow(FileUpload upload, Map<String,String> row, List<TemplateField> fields, String templateId, Counters counts) {
+        try {
+            long started=System.currentTimeMillis(); JsonNode mapped=fieldMapper.mapRowToTemplateFields(row,fields); metrics.recordMappingTime(templateId,System.currentTimeMillis()-started);
+            started=System.currentTimeMillis(); RecordValidator.ValidationResult validation=recordValidator.validateRecord(mapped,fields); metrics.recordValidationTime(templateId,System.currentTimeMillis()-started);
+            if(validation.isValid()) { entityManager.persist(UploadRecord.builder().upload(upload).recordData(mapped).validationStatus("VALID").processingStatus("PENDING").build()); counts.valid++; metrics.incrementRecordsValid(templateId); }
+            else { entityManager.persist(UploadRecord.builder().upload(upload).recordData(mapped).validationStatus("INVALID").validationErrors(validation.getErrors()).processingStatus("FAILED").build()); entityManager.persist(UploadError.builder().upload(upload).rowNumber(counts.total).errorMessage("Validation failed: "+validation.getErrors()).rowData(mapped).build()); counts.invalid++; metrics.incrementRecordsInvalid(templateId); }
+        } catch(Exception exception) { entityManager.persist(UploadError.builder().upload(upload).rowNumber(counts.total).errorMessage("Processing error: "+exception.getMessage()).rowData(fieldMapper.getObjectMapper().valueToTree(row)).build()); counts.invalid++; metrics.incrementRecordsInvalid(templateId); log.warn("Row {} failed for upload {}",counts.total,upload.getId(),exception); }
     }
+    private void complete(UUID id,Counters c,UploadTemplate template,long started) { FileUpload upload=fileUploadRepository.findById(id).orElseThrow(); upload.setTotalRecords(c.total);upload.setSuccessfulRecords(c.valid);upload.setFailedRecords(c.invalid);upload.setUploadStatus(c.valid==c.total?"COMPLETED":"PARTIALLY_COMPLETED");fileUploadRepository.save(upload);metrics.incrementRecordsProcessed(template.getId().toString());metrics.recordProcessingTime(upload.getFileType(),System.currentTimeMillis()-started);if(kafkaEnabled) try { kafkaEventProducer.publishUploadCompletedEvent(UploadCompletedEvent.builder().uploadId(id).templateId(template.getId()).fileName(upload.getFileName()).uploadStatus(upload.getUploadStatus()).totalRecords(c.total).successfulRecords(c.valid).failedRecords(c.invalid).uploadedBy(upload.getUploadedBy()).completedAt(LocalDateTime.now()).build()); } catch(Exception e){log.warn("Upload completed but Kafka publication failed for {}",id,e);} }
+    private void fail(UUID id,Exception exception) { try { FileUpload upload=fileUploadRepository.findById(id).orElse(null);if(upload!=null){upload.setUploadStatus("FAILED");fileUploadRepository.save(upload);} } catch(Exception ignored){log.error("Unable to mark upload {} as FAILED",id,ignored);} }
+    public void processAllPendingUploads(){fileUploadRepository.findByUploadStatus("PENDING").forEach(upload->{try{processFileUpload(upload.getId());}catch(Exception e){log.error("Failed pending upload {}",upload.getId(),e);}});}
+    private static final class Counters { int total; int valid; int invalid; }
 }

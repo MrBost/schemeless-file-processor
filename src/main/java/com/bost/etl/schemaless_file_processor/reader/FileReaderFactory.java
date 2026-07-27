@@ -36,4 +36,8 @@ public class FileReaderFactory {
         FileDataReader reader = getReader(fileType);
         return reader.readRows(file);
     }
+
+    public void forEachRow(File file, String fileType, FileDataReader.RowConsumer consumer) throws Exception {
+        getReader(fileType).forEachRow(file, consumer);
+    }
 }

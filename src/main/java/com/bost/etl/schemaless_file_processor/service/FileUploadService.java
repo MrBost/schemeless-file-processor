@@ -4,6 +4,7 @@ import com.bost.etl.schemaless_file_processor.dto.FileUploadResponse;
 import com.bost.etl.schemaless_file_processor.entity.FileUpload;
 import com.bost.etl.schemaless_file_processor.entity.TemplateField;
 import com.bost.etl.schemaless_file_processor.entity.UploadTemplate;
+import com.bost.etl.schemaless_file_processor.event.UploadAcceptedEvent;
 import com.bost.etl.schemaless_file_processor.exception.AccessDeniedException;
 import com.bost.etl.schemaless_file_processor.exception.FileProcessingException;
 import com.bost.etl.schemaless_file_processor.exception.ResourceNotFoundException;
@@ -13,18 +14,20 @@ import com.bost.etl.schemaless_file_processor.repository.UploadTemplateRepositor
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.scheduling.annotation.Async;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -35,233 +38,100 @@ import static com.bost.etl.schemaless_file_processor.security.UserContext.getCur
 @Service
 @RequiredArgsConstructor
 @Slf4j
-@Transactional
 public class FileUploadService {
-
     private final FileUploadRepository fileUploadRepository;
     private final UploadTemplateRepository templateRepository;
-    private final ProcessingService processingService;
     private final FileReaderFactory fileReaderFactory;
+    private final ApplicationEventPublisher eventPublisher;
 
-    @Value("${app.file.storage.location:./uploads}")
-    private String storageLocation;
+    @Value("${app.file.storage.location:./uploads}") private String storageLocation;
+    @Value("${app.file.allowed-types:csv,xlsx,xls}") private String allowedTypes;
+    @Value("${app.file.storage.max-size-mb:50}") private long maxFileSizeMB;
 
-    @Value("${app.file.allowed-types:csv,xlsx,xls}")
-    private String allowedTypes;
-
-    @Value("${app.file.storage.max-size-mb:50}")
-    private long maxFileSizeMB;
-
+    @Transactional
     public FileUploadResponse uploadFile(MultipartFile file, UUID templateId, String uploadedBy) {
         validateFile(file);
-        
         UploadTemplate template = templateRepository.findById(templateId)
                 .orElseThrow(() -> new ResourceNotFoundException("Template", templateId));
-
-        // Verify user owns the template
-        String currentUser = getCurrentUsername();
-        if (!template.getCreatedBy().equals(currentUser)) {
+        if (!template.getCreatedBy().equals(getCurrentUsername())) {
             throw new AccessDeniedException("You can only upload files using your own templates");
         }
 
         String fileType = getFileExtension(file.getOriginalFilename());
-
-        // Read file bytes once to allow multiple operations
-        byte[] fileBytes = null;
+        Path stagedFile = stageUpload(file, fileType);
+        String storedName = UUID.randomUUID() + "." + fileType;
+        Path target = uploadDirectory().resolve(storedName);
         try {
-            fileBytes = file.getBytes();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+            validateHeaders(stagedFile.toFile(), fileType, template);
+            moveAtomically(stagedFile, target);
+        } catch (Exception exception) {
+            deleteQuietly(stagedFile);
+            throw exception instanceof FileProcessingException processingException
+                    ? processingException : new FileProcessingException("Failed to prepare uploaded file", exception);
         }
+        // The database cannot atomically roll back a filesystem move; clean up the file on DB rollback.
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override public void afterCompletion(int status) {
+                if (status != STATUS_COMMITTED) deleteQuietly(target);
+            }
+        });
 
-        // Validate headers BEFORE storing the file (more efficient for large files)
-        validateHeadersFromBytes(fileBytes, fileType, template);
-
-        // Store file only after header validation passes
-        String fileName = storeFile(fileBytes, fileType);
-
-        FileUpload fileUpload = FileUpload.builder()
-                .template(template)
-                .fileName(fileName)
-                .fileType(fileType)
-                .uploadedBy(uploadedBy)
-                .uploadStatus("PENDING")
-                .totalRecords(0)
-                .successfulRecords(0)
-                .failedRecords(0)
-                .build();
-
-        fileUpload = fileUploadRepository.save(fileUpload);
-
-        log.info("File uploaded successfully: {} by user: {}", fileName, uploadedBy);
-
-        // Trigger async processing
-        processFileAsync(fileUpload.getId());
-
-        return mapToResponse(fileUpload);
+        FileUpload upload = fileUploadRepository.save(FileUpload.builder().template(template).fileName(storedName)
+                .fileType(fileType).uploadedBy(uploadedBy).uploadStatus("PENDING").totalRecords(0)
+                .successfulRecords(0).failedRecords(0).build());
+        eventPublisher.publishEvent(new UploadAcceptedEvent(upload.getId()));
+        log.info("Upload {} accepted for asynchronous processing by {}", upload.getId(), uploadedBy);
+        return mapToResponse(upload);
     }
 
-    @Async
-    public void processFileAsync(UUID uploadId) {
+    private Path stageUpload(MultipartFile file, String fileType) {
         try {
-            log.info("Starting async processing for upload ID: {}", uploadId);
-            processingService.processFileUpload(uploadId);
-        } catch (Exception e) {
-            log.error("Error during async file processing for upload ID: {}", uploadId, e);
-        }
+            Path directory = uploadDirectory();
+            Path staged = Files.createTempFile(directory, "upload-", "." + fileType);
+            try (InputStream source = file.getInputStream()) { Files.copy(source, staged, StandardCopyOption.REPLACE_EXISTING); }
+            validateFileSignature(staged, fileType);
+            return staged;
+        } catch (IOException exception) { throw new FileProcessingException("Failed to stage uploaded file", exception); }
     }
 
-    public FileUploadResponse getUploadById(UUID uploadId) {
-        String currentUser = getCurrentUsername();
-        FileUpload fileUpload = fileUploadRepository.findById(uploadId)
-                .orElseThrow(() -> new ResourceNotFoundException("FileUpload", uploadId));
-        
-        // Verify user owns the upload
-        if (!fileUpload.getUploadedBy().equals(currentUser)) {
-            throw new AccessDeniedException("You can only view your own uploads");
-        }
-        return mapToResponse(fileUpload);
-    }
-
-    public List<FileUploadResponse> getUploadsByTemplate(UUID templateId) {
-        String currentUser = getCurrentUsername();
-        
-        // Verify user owns the template
-        UploadTemplate template = templateRepository.findById(templateId)
-                .orElseThrow(() -> new ResourceNotFoundException("Template", templateId));
-        
-        if (!template.getCreatedBy().equals(currentUser)) {
-            throw new AccessDeniedException("You can only view uploads for your own templates");
-        }
-        
-        return fileUploadRepository.findByTemplateId(templateId).stream()
-                .map(this::mapToResponse)
-                .toList();
-    }
-
-    public List<FileUploadResponse> getUploadsByUser(String uploadedBy) {
-        String currentUser = getCurrentUsername();
-        
-        // Users can only view their own uploads
-        if (!currentUser.equals(uploadedBy)) {
-            log.warn("User {} attempted to access uploads of user {}", currentUser, uploadedBy);
-            throw new AccessDeniedException("You can only view your own uploads");
-        }
-        
-        return fileUploadRepository.findByUploadedBy(uploadedBy).stream()
-                .map(this::mapToResponse)
-                .toList();
-    }
-
-    public List<FileUploadResponse> getUploadsByStatus(String status) {
-        String currentUser = getCurrentUsername();
-        
-        // Users can only view their own uploads by status
-        return fileUploadRepository.findByUploadStatus(status).stream()
-                .filter(upload -> upload.getUploadedBy().equals(currentUser))
-                .map(this::mapToResponse)
-                .toList();
-    }
+    private Path uploadDirectory() { try { Path path = Paths.get(storageLocation).toAbsolutePath().normalize(); Files.createDirectories(path); return path; } catch (IOException exception) { throw new FileProcessingException("Failed to create upload directory", exception); } }
+    private void moveAtomically(Path source, Path target) throws IOException { try { Files.move(source, target, StandardCopyOption.ATOMIC_MOVE); } catch (IOException ignored) { Files.move(source, target, StandardCopyOption.REPLACE_EXISTING); } }
+    private void deleteQuietly(Path path) { try { Files.deleteIfExists(path); } catch (IOException exception) { log.warn("Could not remove staged file {}", path, exception); } }
 
     private void validateFile(MultipartFile file) {
-        if (file.isEmpty()) {
-            throw new FileProcessingException("File is empty");
-        }
+        if (file == null || file.isEmpty()) throw new FileProcessingException("File is empty");
+        String name = file.getOriginalFilename(); if (name == null || name.isBlank()) throw new FileProcessingException("Invalid file name");
+        String extension = getFileExtension(name).toLowerCase();
+        if (!Arrays.asList(allowedTypes.split(",")).contains(extension)) throw new FileProcessingException("File type not allowed. Allowed types: " + allowedTypes);
+        if (file.getSize() > maxFileSizeMB * 1024L * 1024L) throw new FileProcessingException("File size exceeds maximum allowed size of " + maxFileSizeMB + "MB");
+    }
 
-        String originalFilename = file.getOriginalFilename();
-        if (originalFilename == null) {
-            throw new FileProcessingException("Invalid file name");
-        }
-
-        String fileExtension = getFileExtension(originalFilename);
-        List<String> allowedTypeList = Arrays.asList(allowedTypes.split(","));
-        
-        if (!allowedTypeList.contains(fileExtension.toLowerCase())) {
-            throw new FileProcessingException("File type not allowed. Allowed types: " + allowedTypes);
-        }
-
-        long fileSizeMB = file.getSize() / (1024 * 1024);
-        if (fileSizeMB > maxFileSizeMB) {
-            throw new FileProcessingException("File size exceeds maximum allowed size of " + maxFileSizeMB + "MB");
+    private void validateFileSignature(Path file, String type) throws IOException {
+        try (InputStream input = Files.newInputStream(file)) {
+            byte[] header = input.readNBytes(8);
+            boolean zip = header.length >= 4 && header[0] == 'P' && header[1] == 'K' && header[2] == 3 && header[3] == 4;
+            boolean ole = header.length == 8 && (header[0] & 0xff) == 0xD0 && (header[1] & 0xff) == 0xCF && (header[2] & 0xff) == 0x11 && (header[3] & 0xff) == 0xE0;
+            if (("xlsx".equals(type) && !zip) || ("xls".equals(type) && !ole)) throw new FileProcessingException("File contents do not match the selected extension");
         }
     }
 
-    private void validateHeadersFromBytes(byte[] fileBytes, String fileType, UploadTemplate template) {
-        try (InputStream inputStream = new ByteArrayInputStream(fileBytes)) {
-            // Create a temporary file to read headers
-            Path tempPath = Files.createTempFile("header-validation-", "." + fileType);
-            Files.copy(inputStream, tempPath);
-            
-            try {
-                File tempFile = tempPath.toFile();
-                Map<String, String> fileHeaders = fileReaderFactory.readHeaders(tempFile, fileType);
-                
-                List<String> expectedFields = template.getFields().stream()
-                        .map(TemplateField::getFieldName)
-                        .toList();
-                
-                List<String> actualHeaders = fileHeaders.values().stream()
-                        .map(String::trim)
-                        .toList();
-                
-                // Check for missing required fields
-                List<String> missingFields = expectedFields.stream()
-                        .filter(expected -> !actualHeaders.contains(expected))
-                        .toList();
-                
-                if (!missingFields.isEmpty()) {
-                    throw new FileProcessingException(
-                            "File headers do not match template '" + template.getTemplateName() + "'. Missing required fields: " + 
-                            String.join(", ", missingFields)
-                    );
-                }
-                
-                log.info("Header validation passed for template '{}'", template.getTemplateName());
-            } finally {
-                // Clean up temporary file
-                Files.deleteIfExists(tempPath);
-            }
-        } catch (FileProcessingException e) {
-            throw e; // Re-throw FileProcessingException as-is
-        } catch (Exception e) {
-            throw new FileProcessingException("Failed to validate file headers: " + e.getMessage(), e);
-        }
-    }
-
-    private String storeFile(byte[] fileBytes, String fileType) {
+    private void validateHeaders(File file, String type, UploadTemplate template) {
         try {
-            Path uploadPath = Paths.get(storageLocation);
-            if (!Files.exists(uploadPath)) {
-                Files.createDirectories(uploadPath);
-            }
-
-            String uniqueFileName = UUID.randomUUID() + "." + fileType;
-            Path targetLocation = uploadPath.resolve(uniqueFileName);
-            Files.write(targetLocation, fileBytes);
-
-            return uniqueFileName;
-        } catch (IOException ex) {
-            throw new FileProcessingException("Failed to store file", ex);
-        }
+            Map<String, String> headers = fileReaderFactory.readHeaders(file, type);
+            List<String> actual = headers.values().stream().map(value -> value.trim()).toList();
+            List<String> missing = template.getFields().stream().filter(TemplateField::getRequired).map(TemplateField::getFieldName)
+                    .filter(expected -> !actual.contains(expected)).toList();
+            if (!missing.isEmpty()) throw new FileProcessingException("File headers do not match template '" + template.getTemplateName() + "'. Missing required fields: " + String.join(", ", missing));
+        } catch (FileProcessingException exception) { throw exception; }
+        catch (Exception exception) { throw new FileProcessingException("Failed to validate file headers: " + exception.getMessage(), exception); }
     }
 
-    private String getFileExtension(String filename) {
-        if (filename == null || filename.lastIndexOf('.') == -1) {
-            return "";
-        }
-        return filename.substring(filename.lastIndexOf('.') + 1);
-    }
+    private String getFileExtension(String filename) { int index = filename == null ? -1 : filename.lastIndexOf('.'); return index < 0 ? "" : filename.substring(index + 1).toLowerCase(); }
+    private FileUploadResponse mapToResponse(FileUpload upload) { return FileUploadResponse.builder().uploadId(upload.getId()).status(upload.getUploadStatus()).fileName(upload.getFileName()).fileType(upload.getFileType()).totalRecords(upload.getTotalRecords()).successfulRecords(upload.getSuccessfulRecords()).failedRecords(upload.getFailedRecords()).createdAt(upload.getCreatedAt()).build(); }
 
-    private FileUploadResponse mapToResponse(FileUpload fileUpload) {
-        return FileUploadResponse.builder()
-                .uploadId(fileUpload.getId())
-                .status(fileUpload.getUploadStatus())
-                .fileName(fileUpload.getFileName())
-                .fileType(fileUpload.getFileType())
-                .totalRecords(fileUpload.getTotalRecords())
-                .successfulRecords(fileUpload.getSuccessfulRecords())
-                .failedRecords(fileUpload.getFailedRecords())
-                .createdAt(fileUpload.getCreatedAt())
-                .build();
-    }
+    // Query methods retain their public contract and authorization behaviour.
+    public FileUploadResponse getUploadById(UUID id) { FileUpload upload=fileUploadRepository.findById(id).orElseThrow(()->new ResourceNotFoundException("FileUpload",id)); if(!upload.getUploadedBy().equals(getCurrentUsername())) throw new AccessDeniedException("You can only view your own uploads"); return mapToResponse(upload); }
+    public List<FileUploadResponse> getUploadsByTemplate(UUID templateId) { UploadTemplate template=templateRepository.findById(templateId).orElseThrow(()->new ResourceNotFoundException("Template",templateId)); if(!template.getCreatedBy().equals(getCurrentUsername())) throw new AccessDeniedException("You can only view uploads for your own templates"); return fileUploadRepository.findByTemplateId(templateId).stream().map(this::mapToResponse).toList(); }
+    public List<FileUploadResponse> getUploadsByUser(String user) { if(!getCurrentUsername().equals(user)) throw new AccessDeniedException("You can only view your own uploads"); return fileUploadRepository.findByUploadedBy(user).stream().map(this::mapToResponse).toList(); }
+    public List<FileUploadResponse> getUploadsByStatus(String status) { String user=getCurrentUsername(); return fileUploadRepository.findByUploadStatus(status).stream().filter(upload->upload.getUploadedBy().equals(user)).map(this::mapToResponse).toList(); }
 }
